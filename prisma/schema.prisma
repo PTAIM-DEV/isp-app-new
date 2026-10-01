@@ -1,0 +1,1172 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  CUSTOMER
+  LEAD
+  RESELLER
+  FINANCE
+  NOC
+  TECHNICIAN // Adding explicit Technician role for migration
+  SALES
+}
+
+enum UserStatus {
+  LEAD // Registered, not yet installed
+  LEAD_PAYMENT_PENDING // Waiting for installation payment
+  READY_TO_INSTALL // Payment received, ready for scheduling
+  PENDING_INSTALL // Installation scheduled
+  INSTALLED // Installation completed, pending activation
+  INSTALLED_PAYMENT_PENDING // Waiting for first month payment
+  ACTIVE // Installed and active
+  BLOCKED // Soft blocked (overdue)
+  INACTIVE // Churned/Cancelled
+  ON_LEAVE // For Sales/Technician on leave
+}
+
+enum InstallStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum InvoiceStatus {
+  UNPAID
+  PAID
+  OVERDUE
+  EXPIRED
+  CANCELLED
+}
+
+enum CollectionStatus {
+  NOT_COLLECTED      // Belum ditagih
+  COLLECTING         // Sedang ditagih
+  PENDING_CONFIRMATION // Menunggu konfirmasi
+  DISPUTE           // Dispute
+  WRITE_OFF         // Write-off (dihapus dari piutang)
+}
+
+enum TaskType {
+  INSTALLATION
+  MAINTENANCE
+  TROUBLESHOOTING
+  UPGRADE
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum TaskCompletionStatus {
+  SUCCESS
+  FAILED
+  NEEDS_FOLLOWUP
+}
+
+enum PeriodType {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum InvoiceType {
+  INSTALLATION // Tagihan instalasi
+  MONTHLY // Tagihan bulanan
+  PREPAID // Pembayaran sekaligus (3/6/12 bulan)
+  TRIAL // Free trial (untuk tracking)
+}
+
+enum InvoiceCategory {
+  INSTALLATION_FEE
+  FIRST_MONTH
+  REGULAR_MONTHLY
+  PREPAID_3_MONTHS
+  PREPAID_6_MONTHS
+  PREPAID_12_MONTHS
+  TRIAL_PERIOD
+}
+
+model User {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Contact Info
+  name     String
+  email    String? @unique // Optional, as some might register via WA only initially? Let's keep it optional or required based on flow.
+  phone    String  @unique
+  nik      String? @unique // Nomor Induk Kependudukan (NIK)
+  password String? // Nullable if auth via WA OTP only initially, but we probably want a password for web login.
+
+  // Location
+  address   String?
+  latitude  Float?
+  longitude Float?
+
+  // Status
+  role   Role       @default(LEAD)
+  status UserStatus @default(LEAD)
+
+  selectedPackageId   String?
+  ktpImageUrl         String?
+  signatureData       String?   @db.Text
+  agreedToTerms       Boolean   @default(false)
+  agreedAt            DateTime?
+  registeredPromoCode String? // Code entered during registration
+
+  // Assigned Payment Flow (selected by admin before activation)
+  assignedPaymentFlowId String?
+  assignedPaymentFlow   PaymentFlow? @relation("UserAssignedPaymentFlow", fields: [assignedPaymentFlowId], references: [id])
+
+  // Location (new cascading location system)
+  provinceId String?
+  province   Province? @relation(fields: [provinceId], references: [id])
+
+  cityId String?
+  city   City?   @relation(fields: [cityId], references: [id])
+
+  districtId String?
+  district   District? @relation(fields: [districtId], references: [id])
+
+  villageId String?
+  village   Village? @relation(fields: [villageId], references: [id])
+
+  postalCode String? // 5 digit postal code
+
+  // Sales Tracking
+  // Sales Tracking (Existing relation to Sales table - to be deprecated)
+  lastSalesInquirySentAt DateTime?
+  welcomeWhatsappSent    Boolean   @default(false)
+  welcomeWhatsappSentAt  DateTime?
+  welcomeEmailSent       Boolean   @default(false)
+  welcomeEmailSentAt     DateTime?
+
+  // Soft delete
+  deletedAt DateTime? // Soft delete timestamp
+
+  // --- NEW FIELDS FOR MERGE ---
+  // Technician Fields
+  assignedProvinces String[]
+  assignedCities    String[]
+  skills            String[]
+  joinDate          DateTime? @default(now())
+  photoUrl          String?
+
+  // Sales Relation (Self-relation)
+  salesPersonId String?
+  salesPerson   User?   @relation("UserSales", fields: [salesPersonId], references: [id])
+  salesCustomers User[] @relation("UserSales")
+
+  // Technician Relations
+  installationsAssigned Installation[]    @relation("TechnicianInstallations")
+  tasksAssigned         MaintenanceTask[] @relation("TechnicianTasks")
+  reports               TaskReport[]      @relation("TechnicianReports")
+  kpiRecords            KPIRecord[]       @relation("TechnicianKPI")
+
+  // Relations
+  installation        Installation?
+  subscription        Subscription?
+  invoices            Invoice[]
+  promoUsages         PromoUsage[]
+  paymentTransactions PaymentTransaction[]
+  conversations       WhatsAppConversation[]
+  maintenanceTasks    MaintenanceTask[] // Tasks requested by this user (customer)
+  
+  // Hotspot Reseller Relations
+  soldVouchers        HotspotVoucher[] @relation("ResellerVouchers")
+  voucherSales        VoucherSale[]
+  komisiRecords       KomisiRecord[]
+  
+  // SaaS Subscription (untuk multi-tenant)
+  saasSubscription    SaasSubscription?
+}
+
+model RolePermission {
+  id        String   @id @default(cuid())
+  role      Role
+  module    String   // e.g., "users", "billing", "noc"
+  createdAt DateTime @default(now())
+
+  @@unique([role, module])
+}
+
+model Installation {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Scheduling
+  scheduledDate DateTime?
+  completedDate DateTime?
+  startedDate DateTime? // When technician started the task
+
+  // Assignment
+
+  
+  // New Relation for User (Technician)
+  technicianUserId String?
+  technicianUser   User?   @relation("TechnicianInstallations", fields: [technicianUserId], references: [id])
+
+  // Task Details
+  taskType TaskType @default(INSTALLATION) // INSTALLATION, MAINTENANCE, TROUBLESHOOTING, UPGRADE
+  priority Priority @default(NORMAL) // LOW, NORMAL, HIGH, URGENT
+
+  // Status
+  notes  String?
+  status InstallStatus @default(PENDING)
+
+  // Location
+  locationNotes String? // Additional location instructions
+  checkInLatitude Float? // GPS check-in latitude
+  checkInLongitude Float? // GPS check-in longitude
+  checkInTime DateTime? // When technician checked in
+
+  // Relations
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+  reports TaskReport[]
+
+  // Optional External Team/PIC Info
+  picName   String?
+  picPhone  String?
+  teamName  String?
+}
+
+model Subscription {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  planName     String
+  price        Decimal
+  billingCycle Int     @default(30) // Days
+
+  // Dates
+  startDate       DateTime? // Tanggal mulai langganan
+  activatedDate   DateTime? // Tanggal aktivasi (setelah instalasi)
+  trialStartDate  DateTime? // Tanggal mulai trial
+  trialEndDate    DateTime? // Tanggal akhir trial
+  nextBillingDate DateTime? // Tanggal tagihan berikutnya
+
+  // Payment Flow (immutable setelah dibuat)
+  paymentFlowId String?
+  paymentFlow   PaymentFlow? @relation(fields: [paymentFlowId], references: [id])
+
+  // Prepaid Credit
+  prepaidCreditMonths Int       @default(0) // Sisa bulan prepaid
+  prepaidValidUntil   DateTime? // Sampai kapan prepaid berlaku
+  bonusMonthsPending  Int       @default(0) // Bonus bulan yang akan diberikan setelah prepaid habis
+
+  // Status
+  isTrialActive   Boolean @default(false)
+  isPrepaidActive Boolean @default(false)
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+}
+
+model Invoice {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Invoice Details
+  invoiceNumber String?         @unique // Format bisa di-setting di SystemSetting
+  type          InvoiceType
+  category      InvoiceCategory
+  amount        Decimal
+  subtotal      Decimal?
+  taxAmount     Decimal?
+  feeAmount     Decimal?
+  dueDate       DateTime
+  paidAt        DateTime?
+  status        InvoiceStatus   @default(UNPAID)
+
+  // Description
+  description String? // e.g., "Instalasi", "Bulan Pertama", "Prepaid 6 Bulan + 1 Gratis"
+
+  // Xendit Data
+  xenditId  String? @unique
+  xenditUrl String?
+
+  // Payment Gate Tracking
+  isPaymentGate  Boolean   @default(false) // Is this invoice blocking workflow?
+  gateUnlockedAt DateTime? // When payment was confirmed
+
+  // Collection Management
+  collectionStatus CollectionStatus? @default(NOT_COLLECTED) // Status penagihan
+  collectionNotes  String? @db.Text // Catatan penagihan
+
+  // Relations
+  userId     String
+  user       User        @relation(fields: [userId], references: [id])
+  promoUsage PromoUsage?
+
+  // For prepaid invoices
+  prepaidMonths Int? // Berapa bulan yang dibayar
+  bonusMonths   Int? // Bonus bulan gratis (akan diberikan setelah prepaid habis)
+  validUntil    DateTime? // Sampai kapan prepaid berlaku
+
+  // For trial tracking
+  trialEndDate DateTime?
+  trialDays    Int?
+
+  paymentTransactions PaymentTransaction[]
+  scheduledReminders ScheduledReminder[]
+
+  deletedAt DateTime? // Soft delete timestamp
+}
+
+model SystemSetting {
+  key         String  @id
+  value       String
+  description String?
+}
+
+
+
+model MaintenanceTask {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Scheduling
+  scheduledDate DateTime
+  completedDate DateTime?
+  startedDate DateTime?
+
+
+
+  // New Relation
+  technicianUserId String?
+  technicianUser   User?   @relation("TechnicianTasks", fields: [technicianUserId], references: [id])
+
+  // Task Details
+  taskType String // ROUTINE, REPAIR, UPGRADE
+  priority Priority @default(NORMAL)
+  description String?
+  locationNotes String?
+
+  // Customer
+  customerId String
+  customer   User @relation(fields: [customerId], references: [id])
+
+  // Status
+  status TaskStatus @default(PENDING)
+
+  // Location
+  checkInLatitude Float? // GPS check-in latitude
+  checkInLongitude Float? // GPS check-in longitude
+  checkInTime DateTime? // When technician checked in
+
+  // Relations
+  reports TaskReport[]
+
+  // Optional External Team/PIC Info
+  picName   String?
+  picPhone  String?
+  teamName  String?
+}
+
+model TaskReport {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Task Reference
+  installationId String?
+  installation   Installation? @relation(fields: [installationId], references: [id])
+
+  maintenanceTaskId String?
+  maintenanceTask   MaintenanceTask? @relation(fields: [maintenanceTaskId], references: [id])
+
+
+
+  // New Relation
+  technicianUserId String?
+  technicianUser   User?   @relation("TechnicianReports", fields: [technicianUserId], references: [id])
+
+  // Report Details
+  status TaskCompletionStatus // SUCCESS, FAILED, NEEDS_FOLLOWUP
+  description String @db.Text // What was done
+  materialsUsed String? // Materials/equipment used
+  timeSpent Int? // Minutes spent
+  issuesFound String? // Issues encountered
+  recommendations String? // Recommendations
+
+  // Media
+  photos String[] // Array of photo URLs
+
+  // Customer Confirmation
+  customerSignature String? // Base64 signature or URL
+  customerConfirmed Boolean @default(false)
+  customerNotes String?
+
+  // Quality Check
+  needsRevision Boolean @default(false)
+  revisionReason String?
+  reviewedBy String? // Admin/supervisor who reviewed
+  reviewedAt DateTime?
+  approved Boolean @default(true) // Auto-approved, but can be reviewed later
+}
+
+model KPIRecord {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+
+
+  // New Relation
+  technicianUserId String?
+  technicianUser   User?   @relation("TechnicianKPI", fields: [technicianUserId], references: [id])
+
+  // Period
+  periodStart DateTime
+  periodEnd DateTime
+  periodType PeriodType // DAILY, WEEKLY, MONTHLY
+
+  // Metrics
+  totalTasks Int @default(0)
+  completedTasks Int @default(0)
+  onTimeTasks Int @default(0)
+  failedTasks Int @default(0)
+
+  totalTimeSpent Int @default(0) // Total minutes
+  averageTimeSpent Float @default(0) // Average minutes per task
+
+  completionRate Float @default(0) // Percentage
+  onTimeRate Float @default(0) // Percentage
+
+  // Calculated
+  tasksPerDay Float? // Average tasks per day
+  qualityScore Float? // Based on revision rate, customer satisfaction, etc.
+}
+
+
+
+model WhatsAppChat {
+  id      String   @id @default(cuid())
+  jid     String   @unique // WhatsApp ID (e.g. 628123456789@s.whatsapp.net)
+  name    String?
+  unread  Int      @default(0)
+  lastMsg DateTime @default(now())
+
+  messages      WhatsAppMessage[]
+  conversations WhatsAppConversation[]
+  tokenUsages   AITokenUsage[]
+  contacts      Contact[]
+}
+
+model WhatsAppConversation {
+  id            String       @id @default(cuid())
+  chatId        String
+  chat          WhatsAppChat @relation(fields: [chatId], references: [id])
+  userId        String?
+  user          User?        @relation(fields: [userId], references: [id])
+  context       Json? // Store conversation context (last few messages)
+  intent        String? // Detected intent
+  sentiment     String? // positive/negative/neutral
+  resolved      Boolean      @default(false)
+  handedToHuman Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+model AIPrompt {
+  id          String   @id @default(cuid())
+  key         String   @unique // e.g., "system_prompt", "billing_response"
+  prompt      String   @db.Text
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AITokenUsage {
+  id               String   @id @default(cuid())
+  createdAt        DateTime @default(now())
+  model            String // e.g., "gpt-4-turbo"
+  promptTokens     Int
+  completionTokens Int
+  totalTokens      Int
+  cost             Decimal? // Optional: calculated cost
+
+  // Context
+  chatId  String?
+  chat    WhatsAppChat? @relation(fields: [chatId], references: [id])
+  purpose String? // e.g., "chat_response", "intent_classification"
+}
+
+model WhatsAppMessage {
+  id        String       @id @default(cuid())
+  chatId    String
+  chat      WhatsAppChat @relation(fields: [chatId], references: [id])
+  sender    String // 'ME' or JID
+  content   String
+  mediaUrl  String? // URL to downloaded media
+  type      String       @default("text") // text, image, etc.
+  createdAt DateTime     @default(now())
+}
+
+model WhatsAppTemplate {
+  id        String   @id @default(cuid())
+  name      String   // e.g., "WELCOME", "BILLING_REMINDER"
+  content   String   @db.Text
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model WhatsAppOutgoing {
+  id         String   @id @default(cuid())
+  jid        String
+  content    String
+  status     String   @default("PENDING") // PENDING, SENT, FAILED
+  retryCount Int      @default(0)
+  scheduledAt DateTime? // Optional: Schedule message for later
+  metadata   Json?    // Optional: Metadata for tracking message type (e.g. { type: "WELCOME" })
+  createdAt  DateTime @default(now())
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Contact Info
+  name  String
+  phone String @unique
+  lid   String? @unique // WhatsApp LID (Linked Device ID)
+  email String?
+
+  // Additional Info
+  address   String?
+  notes     String? @db.Text
+  tags      String[] // Array of tags for categorization
+
+  // Source tracking
+  source     String? // e.g., "WHATSAPP_CHAT", "MANUAL", "WEBSITE"
+  sourceId   String? // Reference to source (e.g., WhatsAppChat ID)
+  
+  // Status
+  status String @default("ACTIVE") // ACTIVE, INACTIVE, CONVERTED (converted to User)
+
+  // Relations
+  chatId String?
+  chat   WhatsAppChat? @relation(fields: [chatId], references: [id])
+}
+
+model ServicePackage {
+  id               String   @id @default(cuid())
+  name             String
+  speed            String // e.g., "50 Mbps"
+  price            Int
+  description      String?
+  features         String // JSON string of features array
+  isActive         Boolean  @default(true)
+  priceIncludesPPN Boolean  @default(false)
+  isRecommended    Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model PaymentFlow {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name        String
+  description String?
+
+  // Flow Configuration
+  requiresInstallationPayment Boolean  @default(false) // Harus bayar instalasi dulu?
+  installationFeeAmount       Decimal? // Harga instalasi jika ada
+  freeInstallation            Boolean  @default(false) // Gratis instalasi?
+
+  // First Payment
+  requiresFirstMonthPayment     Boolean @default(true) // Bayar bulan pertama?
+  firstMonthPaymentAfterInstall Boolean @default(false) // Bayar setelah instalasi?
+
+  // Trial
+  supportsTrial Boolean @default(false)
+  trialDays     Int? // Default 3 hari
+
+  isActive Boolean @default(true)
+
+  subscriptions   Subscription[]
+  assignedToUsers User[]         @relation("UserAssignedPaymentFlow")
+}
+
+model Promo {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  code        String  @unique
+  name        String
+  description String?
+
+  // Promo Type
+  type          String // "DISCOUNT_PERCENT", "DISCOUNT_AMOUNT", "FREE_INSTALLATION", "BONUS_MONTHS"
+  value         Decimal? // Nilai discount atau bonus
+  cycleDuration Int? // For BONUS_MONTHS: Duration of the paid cycle (e.g. 3, 6, 12)
+
+  // Applicable to
+  applicableToFlowIds    String @default("[]") // JSON array of PaymentFlow IDs
+  applicableToPackageIds String @default("[]") // JSON array of Package IDs
+
+  // Validity
+  validFrom  DateTime
+  validUntil DateTime?
+  maxUses    Int? // Maximum penggunaan
+  usedCount  Int       @default(0)
+
+  isActive Boolean @default(true)
+
+  usages PromoUsage[]
+}
+
+model PromoUsage {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  promoId   String
+  promo     Promo    @relation(fields: [promoId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoiceId String?  @unique
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  usedAt DateTime @default(now())
+}
+
+// Location Master Data Models
+model Province {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cities City[]
+  users  User[]
+}
+
+model City {
+  id         String   @id @default(cuid())
+  name       String
+  provinceId String
+  province   Province @relation(fields: [provinceId], references: [id], onDelete: Cascade)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  districts District[]
+  users     User[]
+
+  @@unique([name, provinceId])
+}
+
+model District {
+  id        String   @id @default(cuid())
+  name      String
+  cityId    String
+  city      City     @relation(fields: [cityId], references: [id], onDelete: Cascade)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users    User[]
+  villages Village[]
+
+  @@unique([name, cityId])
+}
+
+model Village {
+  id         String   @id @default(cuid())
+  name       String
+  districtId String
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  users User[]
+
+  @@unique([name, districtId])
+}
+
+model PaymentTransaction {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  // Xendit Data
+  xenditId       String    @unique // Payment ID from Xendit (not invoice ID)
+  externalId     String // Our reference (usually invoice ID or user ref)
+  amount         Decimal
+  status         String // PAID, EXPIRED, FAILED
+  paymentMethod  String? // e.g., BANK_TRANSFER, QRIS
+  paymentChannel String? // e.g., BCA, MANDIRI
+  paidAt         DateTime?
+
+  // Raw Data
+  rawResponse String @db.Text // JSON string of the full webhook payload
+
+  // Relations
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+}
+
+model AccessLog {
+  id        String   @id @default(cuid())
+  ip        String
+  path      String
+  method    String
+  status    Int
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([ip])
+  @@index([createdAt])
+}
+
+model Blacklist {
+  id        String    @id @default(cuid())
+  ip        String    @unique
+  reason    String?
+  blockedAt DateTime  @default(now())
+  expiresAt DateTime?
+}
+
+model ScheduledReminder {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Invoice reference
+  invoiceId String
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  // Reminder details
+  reminderType String // 'H-5', 'H-2', 'H-0', 'D+1', 'D+2', 'D+5'
+  scheduledAt  DateTime // When to send the reminder
+  sentAt       DateTime? // When it was actually sent
+  status       String   @default("PENDING") // PENDING, SENT, CANCELLED, FAILED
+
+  // Retry mechanism
+  retryCount Int      @default(0)
+  lastError  String?  @db.Text
+
+  // Channel tracking
+  emailSent    Boolean @default(false)
+  whatsappSent Boolean @default(false)
+
+  @@index([status, scheduledAt])
+  @@index([invoiceId])
+}
+
+// ============================================
+// SaaS & Hotspot Management Models
+// ============================================
+
+enum SaasTier {
+  FREE
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum KomisiType {
+  PERCENTAGE  // Persentase dari harga voucher
+  FIXED       // Nominal tetap per voucher
+}
+
+enum KomisiStatus {
+  PENDING     // Belum dibayar
+  PAID        // Sudah dibayar
+  CANCELLED   // Dibatalkan
+}
+
+// SaaS Subscription Tier (untuk limit server per tier)
+model SaasTierConfig {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tier            SaasTier @unique
+  name            String
+  description     String?
+  
+  // Limits
+  maxServers      Int      @default(1) // Maksimal server Mikrotik
+  maxVouchers     Int?     // Maksimal voucher per bulan (null = unlimited)
+  maxResellers    Int?     // Maksimal reseller (null = unlimited)
+  
+  // Pricing
+  monthlyPrice    Decimal
+  yearlyPrice     Decimal?
+  
+  isActive        Boolean  @default(true)
+  
+  subscriptions   SaasSubscription[]
+}
+
+// SaaS Subscription per User/Organization
+model SaasSubscription {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id])
+  
+  tierId          String
+  tier            SaasTierConfig @relation(fields: [tierId], references: [id])
+  
+  // Subscription Dates
+  startDate       DateTime @default(now())
+  endDate         DateTime?
+  isActive        Boolean  @default(true)
+  
+  // Billing
+  billingCycle    String   @default("MONTHLY") // MONTHLY, YEARLY
+  nextBillingDate DateTime?
+  
+  // Relations
+  servers         MikrotikServer[]
+}
+
+// Mikrotik Server Configuration
+model MikrotikServer {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Server Identity
+  name            String
+  description     String?
+  
+  // SaaS Subscription
+  subscriptionId  String?
+  subscription    SaasSubscription? @relation(fields: [subscriptionId], references: [id])
+  
+  // Connection Info
+  host            String   // IP address atau hostname
+  port            Int      @default(8728) // RouterOS API port
+  username        String   // RouterOS username
+  password        String   // RouterOS password (encrypted)
+  useSSL          Boolean  @default(false) // Use SSL/TLS
+  timeout         Int      @default(5000) // Connection timeout (ms)
+
+  // Hotspot Configuration
+  hotspotProfile  String?  // Hotspot profile name di RouterOS
+  hotspotInterface String? // Interface untuk hotspot (e.g., "wlan1")
+
+  // Status
+  isActive        Boolean  @default(true)
+  lastConnected   DateTime?
+  connectionStatus String  @default("DISCONNECTED") // CONNECTED, DISCONNECTED, ERROR
+  errorMessage    String?
+
+  // Relations
+  packages        HotspotPackage[]
+  vouchers        HotspotVoucher[]
+  users           HotspotUser[]
+  sessions        HotspotSession[]
+  sales           VoucherSale[]
+  komisiRules     KomisiRule[]
+}
+
+// Hotspot Package Template
+model HotspotPackage {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Package Info
+  name            String   // e.g., "Paket 1 Jam", "Paket Harian"
+  description     String?
+  
+  // Server Assignment
+  serverId        String
+  server          MikrotikServer @relation(fields: [serverId], references: [id])
+
+  // Voucher Configuration
+  duration        Int      // Durasi dalam menit (e.g., 60 = 1 jam)
+  limitUptime     String?  // Format: "1d / 2d / 60m" (MikroTik format)
+  price           Decimal   // Harga voucher
+
+  // Bandwidth Limit (optional)
+  downloadSpeed   String?  // e.g., "10M" (10 Mbps)
+  uploadSpeed     String?  // e.g., "5M" (5 Mbps)
+
+  // Status
+  isActive        Boolean  @default(true)
+
+  // Relations
+  vouchers        HotspotVoucher[]
+  sales           VoucherSale[]
+  komisiRules     KomisiRule[]
+}
+
+// Hotspot Voucher
+model HotspotVoucher {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Voucher Identity
+  code            String   @unique // Kode voucher (auto-generated)
+  username        String?  @unique // Username untuk login (optional)
+  password        String?  // Password untuk login (optional)
+
+  // Package & Server
+  packageId       String?
+  package         HotspotPackage? @relation(fields: [packageId], references: [id])
+  serverId        String
+  server          MikrotikServer   @relation(fields: [serverId], references: [id])
+
+  // Voucher Configuration
+  duration        Int      // Durasi dalam menit
+  limitUptime     String?  // Limit uptime format MikroTik
+  price           Decimal   // Harga voucher
+
+  // Code Generation Settings
+  prefix          String?  // Prefix untuk code (e.g., "VIP")
+  codeLength      Int       @default(8) // Panjang code
+  combination     String    @default("ALPHANUMERIC") // ALPHANUMERIC, NUMERIC, ALPHABET
+
+  // Usage Tracking
+  status          String   @default("UNUSED") // UNUSED, ACTIVE, EXPIRED, USED
+  activatedAt     DateTime?
+  expiresAt      DateTime?
+  lastUsedAt      DateTime?
+
+  // Reseller
+  resellerUserId  String?
+  resellerUser    User?    @relation("ResellerVouchers", fields: [resellerUserId], references: [id])
+
+  // MikroTik Integration
+  mikrotikUserId  String?  // ID user di MikroTik RouterOS (setelah dibuat)
+  syncedToMikrotik Boolean  @default(false) // Sudah di-sync ke MikroTik?
+  syncedAt         DateTime?
+
+  // WhatsApp Notification
+  whatsappSent     Boolean  @default(false)
+  whatsappSentAt   DateTime?
+  whatsappJid      String?  // JID penerima WhatsApp
+
+  // Relations
+  sessions        HotspotSession[]
+  sales           VoucherSale[]
+}
+
+// Hotspot User (untuk user yang bukan voucher)
+model HotspotUser {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // User Identity
+  username        String   @unique // Username di MikroTik
+  password        String?  // Password (optional, bisa pakai voucher)
+
+  // Server Assignment
+  serverId        String
+  server          MikrotikServer @relation(fields: [serverId], references: [id])
+
+  // Profile & Limits
+  profile         String?  // Hotspot profile name
+  limitUptime     String?  // Uptime limit
+  downloadSpeed   String?  // Download speed limit
+  uploadSpeed     String?  // Upload speed limit
+
+  // Status
+  isActive        Boolean  @default(true)
+  disabled        Boolean  @default(false)
+
+  // MikroTik Integration
+  mikrotikUserId  String?  // ID user di MikroTik RouterOS
+  syncedToMikrotik Boolean @default(false)
+
+  // Relations
+  sessions        HotspotSession[]
+}
+
+// Hotspot Session Tracking
+model HotspotSession {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Session Identity
+  username        String   // Username yang login
+  macAddress      String?  // MAC address device
+  ipAddress       String?  // IP address yang diberikan
+  serverId        String
+  server          MikrotikServer @relation(fields: [serverId], references: [id])
+
+  // Voucher Reference (jika pakai voucher)
+  voucherId       String?
+  voucher         HotspotVoucher? @relation(fields: [voucherId], references: [id])
+
+  // User Reference (jika pakai user)
+  userId          String?
+  user            HotspotUser? @relation(fields: [userId], references: [id])
+
+  // Session Info
+  startTime       DateTime
+  stopTime        DateTime?
+  duration        Int?     // Duration in seconds
+  bytesIn         BigInt?  // Bytes downloaded
+  bytesOut        BigInt?  // Bytes uploaded
+  packetsIn       Int?     // Packets received
+  packetsOut      Int?     // Packets sent
+
+  // Status
+  status          String   @default("ACTIVE") // ACTIVE, STOPPED
+
+  // MikroTik Session ID
+  mikrotikSessionId String? @unique // Session ID dari MikroTik
+
+  @@index([username])
+  @@index([serverId])
+  @@index([voucherId])
+  @@index([startTime])
+}
+
+// Voucher Sale Record
+model VoucherSale {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Sale Info
+  voucherId       String
+  voucher         HotspotVoucher @relation(fields: [voucherId], references: [id])
+  
+  packageId       String?
+  package         HotspotPackage? @relation(fields: [packageId], references: [id])
+
+  serverId        String
+  server          MikrotikServer @relation(fields: [serverId], references: [id])
+
+  // Sale Details
+  quantity        Int      @default(1) // Jumlah voucher yang dijual
+  unitPrice        Decimal  // Harga per voucher
+  totalAmount      Decimal  // Total harga
+  paymentMethod    String?  // CASH, TRANSFER, QRIS, etc.
+  paymentStatus    String   @default("PENDING") // PENDING, PAID, CANCELLED
+
+  // Reseller
+  resellerUserId  String?
+  resellerUser    User?    @relation(fields: [resellerUserId], references: [id])
+
+  // Komisi
+  komisiAmount    Decimal? // Komisi yang diberikan
+  komisiStatus    String?  // PENDING, PAID, CANCELLED
+  komisiPaidAt    DateTime?
+
+  // Notes
+  notes           String?
+
+  // Relations
+  komisiRecords   KomisiRecord[]
+
+  @@index([resellerUserId])
+  @@index([createdAt])
+  @@index([paymentStatus])
+}
+
+// Komisi Configuration Rules
+model KomisiRule {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Rule Name
+  name            String
+  description     String?
+
+  // Applicable To
+  packageId       String?
+  package         HotspotPackage? @relation(fields: [packageId], references: [id])
+  serverId        String?
+  server          MikrotikServer? @relation(fields: [serverId], references: [id])
+  
+  // Reseller Level (optional, untuk tier komisi)
+  resellerLevel   Int?     // Level reseller (1, 2, 3, etc.)
+
+  // Komisi Configuration
+  komisiType      KomisiType @default(PERCENTAGE)
+  komisiValue     Decimal   // Persentase atau nominal tetap
+  minSaleAmount   Decimal?  // Minimum sale untuk dapat komisi
+  maxKomisiAmount Decimal?  // Maksimal komisi per sale
+
+  // Validity
+  validFrom       DateTime @default(now())
+  validUntil      DateTime?
+  isActive        Boolean  @default(true)
+
+  // Relations
+  komisiRecords   KomisiRecord[]
+}
+
+// Komisi Record (tracking komisi yang diberikan)
+model KomisiRecord {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Reseller
+  resellerUserId  String
+  resellerUser    User     @relation(fields: [resellerUserId], references: [id])
+
+  // Sale Reference
+  saleId          String   @unique
+  sale            VoucherSale @relation(fields: [saleId], references: [id])
+
+  // Komisi Rule Reference
+  ruleId          String?
+  rule            KomisiRule? @relation(fields: [ruleId], references: [id])
+
+  // Komisi Details
+  komisiAmount    Decimal
+  komisiType      KomisiType
+  komisiValue     Decimal   // Value yang digunakan (persentase atau nominal)
+  baseAmount      Decimal   // Base amount untuk kalkulasi komisi
+
+  // Status
+  status          KomisiStatus @default(PENDING)
+  paidAt          DateTime?
+  paymentNotes    String?
+
+  @@index([resellerUserId])
+  @@index([status])
+  @@index([createdAt])
+}

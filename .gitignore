@@ -1,0 +1,47 @@
+# ... existing content ...
+
+# Database backups
+backups/
+*.sql.gz
+# Don't ignore migration files
+# *.sql
+# But ignore backup SQL files
+backups/*.sql
+node_modules/
+.next/
+
+# --- clawd cleanup ---
+# OS / editor noise
+.DS_Store
+._*
+Thumbs.db
+# next.js
+out/
+# dependencies
+# env files
+.env
+.env.*
+!env.template
+!.env.example
+# logs
+logs/
+*.log
+# dumps/backups
+*.dump
+*.bak
+
+# repo-local tooling / scratch
+.agent/
+_cleanup/
+data/
+*.sql
+!prisma/migrations/**/migration.sql
+backup.sql
+
+/.deploy-config
+
+/public/uploads/
+
+/Mikhmon/extracted/config/config.ini
+/Mikhmon/extracted/mikhmon/config/config.php
+*.tsbuildinfo

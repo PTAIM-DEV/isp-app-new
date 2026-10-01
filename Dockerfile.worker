@@ -1,0 +1,64 @@
+# Dockerfile untuk WhatsApp Worker
+FROM node:20-alpine AS base
+
+# Install dependencies
+FROM base AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Configure npm untuk mengatasi timeout
+RUN npm config set fetch-timeout 300000 && \
+    npm config set fetch-retries 5 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000
+
+COPY package.json package-lock.json* ./
+RUN npm ci --prefer-offline --no-audit
+
+# Build stage
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Generate Prisma Client (gunakan dummy DATABASE_URL untuk build)
+ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
+RUN npx prisma generate
+
+# Build worker - Skipped for ts-node runtime
+WORKDIR /app/worker
+# RUN npx tsc (Skipped)
+
+# Production stage
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV production
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Copy necessary files
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nextjs:nodejs /app/src ./src
+COPY --from=builder --chown=nextjs:nodejs /app/worker ./worker
+COPY --from=builder --chown=nextjs:nodejs /app/package.json ./
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/tsconfig.json ./
+COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
+
+# Create directories untuk uploads
+RUN mkdir -p public/uploads/whatsapp
+RUN chown -R nextjs:nodejs /app
+
+USER nextjs
+
+# Install tsx globally in runner stage? No, need root permissions before USER nextjs
+USER root
+RUN npm install -g tsx
+USER nextjs
+
+ENV TS_NODE_PROJECT=worker/tsconfig.json
+CMD ["tsx", "worker/whatsapp.ts"]
+

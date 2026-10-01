@@ -1,0 +1,162 @@
+networks:
+  default:
+    name: isp-app_default
+    external: false
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: isp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-isp_app}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432" # Only bind to localhost for security
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m" # Rotate setelah 10MB
+        max-file: "7" # Simpan 7 file (7 hari)
+        compress: "true" # Compress log lama
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Message Queue
+  redis:
+    image: redis:7-alpine
+    container_name: isp-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Next.js Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: isp-app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-isp_app}?schema=public
+      XENDIT_SECRET_KEY: ${XENDIT_SECRET_KEY}
+      XENDIT_CALLBACK_TOKEN: ${XENDIT_CALLBACK_TOKEN}
+      NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}
+      EVOLUTION_API_URL: ${EVOLUTION_API_URL:-http://evolution-api:8888}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      EVOLUTION_INSTANCE_NAME: ${EVOLUTION_INSTANCE_NAME:-isp-app}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      NODE_ENV: production
+    volumes:
+      - uploads_data:/app/public/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      evolution-api:
+        condition: service_started
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 10 &&
+        ./node_modules/.bin/prisma migrate deploy || npx prisma@6.19.0 migrate deploy || echo 'Migration failed or already applied' &&
+        echo 'Starting application...' &&
+        node server.js
+      "
+  # EvolutionAPI Service
+  evolution-api:
+    image: evolution-api-local:latest
+    container_name: isp-evolution-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${EVOLUTION_API_PORT:-8888}:8888"
+    environment:
+      SERVER_PORT: 8888
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-ubah-saya}
+      SERVER_URL: ${SERVER_URL:-http://isp-app:3000}
+      # Webhook Configuration - Disabled global, will use per-instance
+      WEBHOOK_GLOBAL_ENABLED: false
+      WEBHOOK_GLOBAL_URL: ""
+      # Session Config
+      CONFIG_SESSION_PHONE_CLIENT: EvolutionAPI
+      CONFIG_SESSION_PHONE_NAME: ${EVOLUTION_INSTANCE_NAME:-isp-app}
+      # Database Configuration
+      DATABASE_ENABLED: true
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-isp_app}?schema=evolution
+      DATABASE_CLIENT_NAME: evolution_api
+      # Cache Configuration - LOCAL for session persistence
+      CACHE_REDIS_ENABLED: false
+      CACHE_LOCAL_ENABLED: true
+      # WebSocket for real-time updates
+      WEBSOCKET_ENABLED: true
+      # QR Code limit
+      QRCODE_LIMIT: 30
+    volumes:
+      - evolution_store:/evolution/store
+      - evolution_instances:/evolution/instances
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8888/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Allow container to reach host network (for webhook to app running on host)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  # WhatsApp Worker - Re-enabled for queue processing
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: isp-worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-isp_app}?schema=public
+      EVOLUTION_API_URL: ${EVOLUTION_API_URL:-http://evolution-api:8888}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      EVOLUTION_INSTANCE_NAME: ${EVOLUTION_INSTANCE_NAME:-isp-app}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Redis Configuration for Queue Consumer
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      NODE_ENV: production
+    volumes:
+      - uploads_data:/app/public/uploads
+    depends_on:
+      app:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  postgres_data:
+    driver: local
+  uploads_data:
+    driver: local
+  redis_data:
+    driver: local
+  evolution_store:
+    driver: local
+  evolution_instances:
+    driver: local

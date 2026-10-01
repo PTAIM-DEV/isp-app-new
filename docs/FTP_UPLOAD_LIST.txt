@@ -1,0 +1,57 @@
+📋 DAFTAR FILE YANG HARUS DI-UPLOAD KE REMOTE SERVER
+=====================================================
+
+✅ FILE WAJIB (Root Directory):
+--------------------------------
+docker-compose.yml
+Dockerfile
+Dockerfile.worker
+.dockerignore
+env.template
+package.json
+package-lock.json
+next.config.js
+tsconfig.json
+
+✅ FOLDER WAJIB:
+----------------
+prisma/              (seluruh folder beserta isinya)
+app/                 (seluruh folder beserta isinya)
+components/          (seluruh folder beserta isinya)
+lib/                 (seluruh folder beserta isinya)
+public/              (seluruh folder beserta isinya)
+
+✅ FILE OPSIONAL (Helper Scripts):
+----------------------------------
+docker-setup.sh
+docker-deploy.sh
+docker-status.sh
+docker-logs.sh
+DEPLOY.md
+
+❌ JANGAN UPLOAD:
+-----------------
+node_modules/        (akan di-build di Docker)
+.next/              (akan di-build di Docker)
+.env.local          (buat .env baru di server)
+*.log               (log files)
+.git/               (git directory, opsional)
+README.md           (dokumentasi, opsional)
+deploy-package/     (folder temporary)
+
+📝 CATATAN PENTING:
+-------------------
+1. Setelah upload, buat file .env di server dari env.template
+2. Edit .env dengan konfigurasi sesuai server
+3. Pastikan Docker dan Docker Compose sudah terinstall di server
+4. Jalankan: docker-compose build && docker-compose up -d
+
+🔧 SETUP DI SERVER:
+-------------------
+1. Upload semua file dan folder di atas ke server
+2. Buat .env: cp env.template .env
+3. Edit .env: nano .env
+4. Build: docker-compose build
+5. Start: docker-compose up -d
+6. Setup DB: docker-compose exec app npx prisma@6.19.0 db push
+
